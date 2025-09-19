@@ -1,5 +1,6 @@
 from telethon import TelegramClient, Button, events
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, ConnectionError, RPCError
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, RPCError
+from telethon.errors.rpcerrorlist import NetworkError, TimedOutError
 from aiohttp import web, ClientSession
 from dotenv import load_dotenv
 import os
@@ -267,7 +268,7 @@ async def delayed_message_loop(task_id):
                 
                 await asyncio.sleep(delay)
                 
-            except (ConnectionError, RPCError) as conn_error:
+            except (NetworkError, TimedOutError, RPCError) as conn_error:
                 consecutive_errors += 1
                 logger.error(f"Connection error in task {task_id}: {conn_error}")
                 
@@ -500,14 +501,648 @@ async def connect(event):
     except Exception as e:
         logger.error(f"Error in connect handler: {e}")
 
-# Add all other handlers here (they're mostly the same but with improved error handling)
-# ... [Include all the remaining handlers from the original code]
+@events.register(events.CallbackQuery(data=b"back_start"))
+async def back_start(event):
+    try:
+        user_id = str(event.sender_id)
+        if user_id in user_sessions and user_sessions[user_id].get('connected'):
+            await event.edit(
+                "<b>🎉 Welcome back! Your account is connected.</b>",
+                buttons=main_menu(),
+                parse_mode="HTML",
+            )
+        else:
+            await event.edit(
+                f"<b>👋 Hi! I'm {bot_name}!</b>\n\n"
+                "I help you send delayed messages to your Telegram chats and groups.\n\n"
+                "<b>Features:</b>\n"
+                "• Send messages with custom delays\n"
+                "• Control multiple message tasks\n"
+                "• Pause/Resume/Stop functionality\n"
+                "• Send to any chat or group you have access to",
+                buttons=inline_buttons(),
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.error(f"Error in back_start handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"apiid"))
+async def set_api_id(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = {'state': 'waiting_api_id'}
+        
+        await event.edit(
+            "<b>🆔 API ID Setup</b>\n\n"
+            "Please send your API ID (numbers only):\n\n"
+            "Get it from: https://my.telegram.org/apps",
+            buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in set_api_id handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"apihash"))
+async def set_api_hash(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = {'state': 'waiting_api_hash'}
+        
+        await event.edit(
+            "<b>🔑 API Hash Setup</b>\n\n"
+            "Please send your API Hash:\n\n"
+            "Get it from: https://my.telegram.org/apps",
+            buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in set_api_hash handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"phone"))
+async def set_phone(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = {'state': 'waiting_phone'}
+        
+        await event.edit(
+            "<b>📱 Phone Number Setup</b>\n\n"
+            "Please send your phone number with country code:\n"
+            "Example: +1234567890",
+            buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in set_phone handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"dial"))
+async def dial_connection(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id not in user_data:
+            await event.edit("❌ No data found. Please set up your credentials first.")
+            return
+        
+        data = user_data[user_id]
+        required_fields = ['api_id', 'api_hash', 'phone']
+        
+        if not all(data.get(field) for field in required_fields):
+            await event.edit("❌ Please set all required fields first.")
+            return
+        
+        await event.edit("🔄 Connecting to your account...")
+        
+        try:
+            client = TelegramClient(
+                f"user_{user_id}", 
+                data['api_id'], 
+                data['api_hash'],
+                connection_retries=3,
+                retry_delay=2,
+                auto_reconnect=True
+            )
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                result = await client.send_code_request(data['phone'])
+                user_data[user_id]['phone_code_hash'] = result.phone_code_hash
+                user_states[user_id] = {'state': 'waiting_code', 'client': client}
+                
+                await event.edit(
+                    "<b>📟 Verification Code</b>\n\n"
+                    f"Code sent to: {data['phone']}\n"
+                    "Please send the verification code:",
+                    buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+                    parse_mode="HTML"
+                )
+            else:
+                user_sessions[user_id] = {'client': client, 'connected': True}
+                await event.edit(
+                    "✅ Successfully connected to your account!",
+                    buttons=main_menu(),
+                    parse_mode="HTML"
+                )
+        
+        except Exception as e:
+            await event.edit(f"❌ Connection failed: {str(e)}")
+            logger.error(f"Connection error for user {user_id}: {e}")
+            
+    except Exception as e:
+        logger.error(f"Error in dial_connection handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"send_delayed"))
+async def send_delayed(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id not in user_sessions or not user_sessions[user_id].get('connected'):
+            await event.edit(
+                "❌ Please connect your account first.",
+                buttons=[[Button.inline("🔗 Connect", data="connect")]]
+            )
+            return
+        
+        if user_id not in user_data:
+            user_data[user_id] = {}
+        
+        data = user_data[user_id]
+        status_text = "<b>📤 Delayed Message Setup:</b>\n\n"
+        status_text += f"Message: {'✅ Set' if data.get('message') else '❌ Not set'}\n"
+        status_text += f"Delay: {'✅ ' + str(data.get('delay', 0)) + 's' if data.get('delay') else '❌ Not set'}\n"
+        status_text += f"Chat: {'✅ Selected' if data.get('chat_id') else '❌ Not selected'}\n\n"
+        status_text += "Configure all settings, then start sending:"
+        
+        await event.edit(
+            status_text,
+            buttons=delayed_message_menu(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in send_delayed handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"back_main"))
+async def back_main(event):
+    try:
+        await event.edit(
+            "<b>🎉 Welcome back! Your account is connected.</b>",
+            buttons=main_menu(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in back_main handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"set_message"))
+async def set_message(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = {'state': 'waiting_message'}
+        
+        await event.edit(
+            "<b>📝 Set Message</b>\n\n"
+            "Please send the message you want to send repeatedly:",
+            buttons=[[Button.inline("◀️ Cancel", data="send_delayed")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in set_message handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"set_delay"))
+async def set_delay(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = {'state': 'waiting_delay'}
+        
+        await event.edit(
+            "<b>⏰ Set Delay</b>\n\n"
+            "Please send the delay in seconds between messages:\n"
+            "Example: 30 (for 30 seconds)",
+            buttons=[[Button.inline("◀️ Cancel", data="send_delayed")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in set_delay handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"select_chat"))
+async def select_chat(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = {'state': 'waiting_chat'}
+        
+        await event.edit(
+            "<b>🎯 Select Chat</b>\n\n"
+            "Please send the chat/group username or ID:\n\n"
+            "Examples:\n"
+            "• @username\n"
+            "• Chat ID: -1001234567890\n"
+            "• Or forward a message from the target chat",
+            buttons=[[Button.inline("◀️ Cancel", data="send_delayed")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in select_chat handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"start_sending"))
+async def start_sending(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id not in user_data:
+            await event.edit("❌ No data found.")
+            return
+        
+        data = user_data[user_id]
+        required_fields = ['message', 'delay', 'chat_id']
+        
+        if not all(data.get(field) for field in required_fields):
+            await event.edit("❌ Please configure all settings first.")
+            return
+        
+        task_id = str(uuid.uuid4())
+        active_tasks[task_id] = {
+            'user_id': user_id,
+            'message': data['message'],
+            'delay': data['delay'],
+            'chat_id': data['chat_id'],
+            'status': 'running',
+            'count': 0,
+            'started_at': datetime.now()
+        }
+        
+        asyncio.create_task(delayed_message_loop(task_id))
+        
+        await event.edit(
+            f"🚀 <b>Message sending started!</b>\n\n"
+            f"Message: {data['message'][:50]}{'...' if len(data['message']) > 50 else ''}\n"
+            f"Delay: {data['delay']} seconds\n"
+            f"Task ID: {task_id[:8]}\n\n"
+            f"Use 'My Active Messages' to control this task.",
+            buttons=main_menu(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in start_sending handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"active_messages"))
+async def active_messages(event):
+    try:
+        user_id = str(event.sender_id)
+        user_tasks = {k: v for k, v in active_tasks.items() if v['user_id'] == user_id}
+        
+        if not user_tasks:
+            await event.edit(
+                "📋 <b>No active messages</b>\n\n"
+                "You don't have any running message tasks.",
+                buttons=[[Button.inline("◀️ Back", data="back_main")]],
+                parse_mode="HTML"
+            )
+            return
+        
+        text = "📋 <b>Your Active Messages:</b>\n\n"
+        buttons = []
+        
+        for task_id, task in user_tasks.items():
+            short_id = task_id[:8]
+            status_emoji = "▶️" if task['status'] == 'running' else "⏸️"
+            text += f"{status_emoji} <b>{short_id}</b>\n"
+            text += f"Message: {task['message'][:30]}{'...' if len(task['message']) > 30 else ''}\n"
+            text += f"Count: {task['count']} | Delay: {task['delay']}s\n\n"
+            
+            buttons.append([Button.inline(f"Control {short_id}", data=f"control_{task_id}")])
+        
+        buttons.append([Button.inline("◀️ Back", data="back_main")])
+        
+        await event.edit(text, buttons=buttons, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in active_messages handler: {e}")
+
+@events.register(events.NewMessage())
+async def handle_text_messages(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id not in user_states:
+            return
+        
+        state = user_states[user_id]
+        
+        if state.get('state') == 'waiting_api_id':
+            try:
+                api_id = int(event.text)
+                if user_id not in user_data:
+                    user_data[user_id] = {}
+                user_data[user_id]['api_id'] = api_id
+                await save_user_data()
+                del user_states[user_id]
+                
+                await event.respond(
+                    "✅ API ID saved successfully!",
+                    buttons=[[Button.inline("◀️ Back to Setup", data="connect")]]
+                )
+            except ValueError:
+                await event.respond("❌ Please send a valid API ID (numbers only).")
+        
+        elif state.get('state') == 'waiting_api_hash':
+            api_hash = event.text.strip()
+            if user_id not in user_data:
+                user_data[user_id] = {}
+            user_data[user_id]['api_hash'] = api_hash
+            await save_user_data()
+            del user_states[user_id]
+            
+            await event.respond(
+                "✅ API Hash saved successfully!",
+                buttons=[[Button.inline("◀️ Back to Setup", data="connect")]]
+            )
+        
+        elif state.get('state') == 'waiting_phone':
+            phone = event.text.strip()
+            if user_id not in user_data:
+                user_data[user_id] = {}
+            user_data[user_id]['phone'] = phone
+            await save_user_data()
+            del user_states[user_id]
+            
+            await event.respond(
+                "✅ Phone number saved successfully!",
+                buttons=[[Button.inline("◀️ Back to Setup", data="connect")]]
+            )
+        
+        elif state.get('state') == 'waiting_code':
+            code = event.text.strip()
+            client = state['client']
+            
+            try:
+                await client.sign_in(
+                    user_data[user_id]['phone'],
+                    code,
+                    phone_code_hash=user_data[user_id]['phone_code_hash']
+                )
+                
+                user_sessions[user_id] = {'client': client, 'connected': True}
+                del user_states[user_id]
+                
+                await event.respond(
+                    "✅ Successfully connected to your account!",
+                    buttons=main_menu()
+                )
+            except PhoneCodeInvalidError:
+                await event.respond("❌ Invalid code. Please try again.")
+            except SessionPasswordNeededError:
+                user_states[user_id] = {'state': 'waiting_password', 'client': client}
+                await event.respond("🔐 Two-factor authentication enabled. Please send your password:")
+        
+        elif state.get('state') == 'waiting_password':
+            password = event.text.strip()
+            client = state['client']
+            
+            try:
+                await client.sign_in(password=password)
+                user_sessions[user_id] = {'client': client, 'connected': True}
+                del user_states[user_id]
+                
+                await event.respond(
+                    "✅ Successfully connected to your account!",
+                    buttons=main_menu()
+                )
+            except Exception as e:
+                await event.respond(f"❌ Authentication failed: {str(e)}")
+        
+        elif state.get('state') == 'waiting_message':
+            message = event.text
+            if user_id not in user_data:
+                user_data[user_id] = {}
+            user_data[user_id]['message'] = message
+            await save_user_data()
+            del user_states[user_id]
+            
+            await event.respond(
+                f"✅ Message saved: {message[:100]}{'...' if len(message) > 100 else ''}",
+                buttons=[[Button.inline("◀️ Back to Setup", data="send_delayed")]]
+            )
+        
+        elif state.get('state') == 'waiting_delay':
+            try:
+                delay = int(event.text)
+                if delay < 1:
+                    await event.respond("❌ Delay must be at least 1 second.")
+                    return
+                
+                if user_id not in user_data:
+                    user_data[user_id] = {}
+                user_data[user_id]['delay'] = delay
+                await save_user_data()
+                del user_states[user_id]
+                
+                await event.respond(
+                    f"✅ Delay set to {delay} seconds",
+                    buttons=[[Button.inline("◀️ Back to Setup", data="send_delayed")]]
+                )
+            except ValueError:
+                await event.respond("❌ Please send a valid number of seconds.")
+        
+        elif state.get('state') == 'waiting_chat':
+            chat_input = event.text.strip()
+            
+            try:
+                if chat_input.startswith('@'):
+                    chat_id = chat_input
+                elif chat_input.lstrip('-').isdigit():
+                    chat_id = int(chat_input)
+                else:
+                    await event.respond("❌ Invalid chat format. Use @username or chat ID.")
+                    return
+                
+                if user_id not in user_data:
+                    user_data[user_id] = {}
+                user_data[user_id]['chat_id'] = chat_id
+                await save_user_data()
+                del user_states[user_id]
+                
+                await event.respond(
+                    f"✅ Chat selected: {chat_id}",
+                    buttons=[[Button.inline("◀️ Back to Setup", data="send_delayed")]]
+                )
+            except Exception as e:
+                await event.respond(f"❌ Error setting chat: {str(e)}")
+    
+    except Exception as e:
+        logger.error(f"Error in handle_text_messages: {e}")
+
+@events.register(events.CallbackQuery(pattern=b"control_(.+)"))
+async def control_task(event):
+    try:
+        task_id = event.data_match.group(1).decode()
+        
+        if task_id not in active_tasks:
+            await event.edit("❌ Task not found or already completed.")
+            return
+        
+        task = active_tasks[task_id]
+        short_id = task_id[:8]
+        
+        text = f"🎛️ <b>Control Task: {short_id}</b>\n\n"
+        text += f"Message: {task['message'][:50]}{'...' if len(task['message']) > 50 else ''}\n"
+        text += f"Status: {'🟢 Running' if task['status'] == 'running' else '🟡 Paused'}\n"
+        text += f"Messages sent: {task['count']}\n"
+        text += f"Delay: {task['delay']} seconds\n"
+        text += f"Started: {task['started_at'].strftime('%H:%M:%S')}"
+        
+        await event.edit(
+            text,
+            buttons=message_control_menu(task_id),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in control_task handler: {e}")
+
+@events.register(events.CallbackQuery(pattern=b"pause_(.+)"))
+async def pause_task(event):
+    try:
+        task_id = event.data_match.group(1).decode()
+        
+        if task_id in active_tasks:
+            active_tasks[task_id]['status'] = 'paused'
+            await event.answer("⏸️ Task paused")
+            
+            task = active_tasks[task_id]
+            short_id = task_id[:8]
+            
+            text = f"🎛️ <b>Control Task: {short_id}</b>\n\n"
+            text += f"Message: {task['message'][:50]}{'...' if len(task['message']) > 50 else ''}\n"
+            text += f"Status: 🟡 Paused\n"
+            text += f"Messages sent: {task['count']}\n"
+            text += f"Delay: {task['delay']} seconds\n"
+            text += f"Started: {task['started_at'].strftime('%H:%M:%S')}"
+            
+            await event.edit(
+                text,
+                buttons=message_control_menu(task_id),
+                parse_mode="HTML"
+            )
+        else:
+            await event.answer("❌ Task not found")
+    except Exception as e:
+        logger.error(f"Error in pause_task handler: {e}")
+
+@events.register(events.CallbackQuery(pattern=b"resume_(.+)"))
+async def resume_task(event):
+    try:
+        task_id = event.data_match.group(1).decode()
+        
+        if task_id in active_tasks:
+            active_tasks[task_id]['status'] = 'running'
+            await event.answer("▶️ Task resumed")
+            
+            task = active_tasks[task_id]
+            short_id = task_id[:8]
+            
+            text = f"🎛️ <b>Control Task: {short_id}</b>\n\n"
+            text += f"Message: {task['message'][:50]}{'...' if len(task['message']) > 50 else ''}\n"
+            text += f"Status: 🟢 Running\n"
+            text += f"Messages sent: {task['count']}\n"
+            text += f"Delay: {task['delay']} seconds\n"
+            text += f"Started: {task['started_at'].strftime('%H:%M:%S')}"
+            
+            await event.edit(
+                text,
+                buttons=message_control_menu(task_id),
+                parse_mode="HTML"
+            )
+        else:
+            await event.answer("❌ Task not found")
+    except Exception as e:
+        logger.error(f"Error in resume_task handler: {e}")
+
+@events.register(events.CallbackQuery(pattern=b"stop_(.+)"))
+async def stop_task(event):
+    try:
+        task_id = event.data_match.group(1).decode()
+        
+        if task_id in active_tasks:
+            del active_tasks[task_id]
+            await event.answer("🛑 Task stopped")
+            
+            await event.edit(
+                "🛑 <b>Task Stopped</b>\n\n"
+                "The message task has been stopped and removed.",
+                buttons=[[Button.inline("◀️ Back to Active Messages", data="active_messages")]],
+                parse_mode="HTML"
+            )
+        else:
+            await event.answer("❌ Task not found")
+    except Exception as e:
+        logger.error(f"Error in stop_task handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"settings"))
+async def settings_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id not in user_sessions or not user_sessions[user_id].get('connected'):
+            await event.edit(
+                "❌ Please connect your account first.",
+                buttons=[[Button.inline("🔗 Connect", data="connect")]]
+            )
+            return
+        
+        user_tasks = len([k for k, v in active_tasks.items() if v['user_id'] == user_id])
+        
+        settings_text = "<b>⚙️ Settings</b>\n\n"
+        settings_text += f"Connection: ✅ Connected\n"
+        settings_text += f"Active Tasks: {user_tasks}\n"
+        settings_text += f"Phone: {user_data.get(user_id, {}).get('phone', 'Not set')}\n\n"
+        settings_text += "Available actions:"
+        
+        await event.edit(
+            settings_text,
+            buttons=[
+                [Button.inline("🔌 Disconnect Account", data="disconnect")],
+                [Button.inline("🗑️ Clear All Tasks", data="clear_tasks")],
+                [Button.inline("◀️ Back", data="back_main")]
+            ],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in settings_handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"disconnect"))
+async def disconnect_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        user_tasks = [k for k, v in active_tasks.items() if v['user_id'] == user_id]
+        for task_id in user_tasks:
+            del active_tasks[task_id]
+        
+        if user_id in user_sessions:
+            try:
+                if user_sessions[user_id].get('client'):
+                    await user_sessions[user_id]['client'].disconnect()
+            except:
+                pass
+            del user_sessions[user_id]
+        
+        if user_id in user_data:
+            del user_data[user_id]
+        
+        await save_user_data()
+        
+        await event.edit(
+            "🔌 <b>Account Disconnected</b>\n\n"
+            "Your account has been disconnected and all active tasks stopped.\n"
+            "Your data has been cleared from the bot.",
+            buttons=[[Button.inline("🔗 Connect Again", data="connect")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in disconnect_handler: {e}")
+
+@events.register(events.CallbackQuery(data=b"clear_tasks"))
+async def clear_tasks_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        user_tasks = [k for k, v in active_tasks.items() if v['user_id'] == user_id]
+        for task_id in user_tasks:
+            del active_tasks[task_id]
+        
+        await event.edit(
+            f"🗑️ <b>Tasks Cleared</b>\n\n"
+            f"Stopped and removed {len(user_tasks)} active tasks.",
+            buttons=[[Button.inline("◀️ Back to Settings", data="settings")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in clear_tasks_handler: {e}")
 
 async def register_handlers():
     if bot_client:
         handlers = [
-            start, help_handler, connect,
-            # Add all other handlers here
+            start, help_handler, connect, back_start, set_api_id, set_api_hash,
+            set_phone, dial_connection, send_delayed, back_main, set_message,
+            set_delay, select_chat, start_sending, active_messages,
+            handle_text_messages, control_task, pause_task, resume_task,
+            stop_task, settings_handler, disconnect_handler, clear_tasks_handler
         ]
         
         for handler in handlers:
