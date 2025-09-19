@@ -650,6 +650,108 @@ async def message_handler(event):
                     buttons=[[Button.inline("◀️ Cancel", data="send_delayed")]],
                     parse_mode="HTML"
                 )
+        
+        elif state == 'waiting_code':
+            try:
+                code = event.text.strip()
+                temp_client = user_data[user_id].get('temp_client')
+                
+                if not temp_client:
+                    await event.respond(
+                        "<b>❌ Session expired!</b>\nPlease try connecting again.",
+                        buttons=structure_connect(),
+                        parse_mode="HTML"
+                    )
+                    del user_states[user_id]
+                    return
+                
+                try:
+                    await temp_client.sign_in(user_data[user_id]['phone'], code)
+                    
+                    user_sessions[user_id] = {
+                        'client': temp_client,
+                        'connected': True,
+                        'connected_at': datetime.now()
+                    }
+                    
+                    if 'temp_client' in user_data[user_id]:
+                        del user_data[user_id]['temp_client']
+                    
+                    await event.respond(
+                        "<b>✅ Successfully connected!</b>\n\n"
+                        "Your account is now linked. You can start sending delayed messages.",
+                        buttons=main_menu(),
+                        parse_mode="HTML"
+                    )
+                    del user_states[user_id]
+                    
+                except SessionPasswordNeededError:
+                    user_states[user_id] = 'waiting_password'
+                    await event.respond(
+                        "<b>🔒 Two-Factor Authentication</b>\n\n"
+                        "Please send your 2FA password:",
+                        buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+                        parse_mode="HTML"
+                    )
+                    
+                except PhoneCodeInvalidError:
+                    await event.respond(
+                        "<b>❌ Invalid verification code!</b>\n"
+                        "Please check and try again.",
+                        buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+                        parse_mode="HTML"
+                    )
+                    
+            except Exception as verify_error:
+                logger.error(f"Verification error: {verify_error}")
+                await event.respond(
+                    f"<b>❌ Verification failed!</b>\n\n"
+                    f"Error: {str(verify_error)[:100]}",
+                    buttons=structure_connect(),
+                    parse_mode="HTML"
+                )
+                del user_states[user_id]
+        
+        elif state == 'waiting_password':
+            try:
+                password = event.text.strip()
+                temp_client = user_data[user_id].get('temp_client')
+                
+                if not temp_client:
+                    await event.respond(
+                        "<b>❌ Session expired!</b>\nPlease try connecting again.",
+                        buttons=structure_connect(),
+                        parse_mode="HTML"
+                    )
+                    del user_states[user_id]
+                    return
+                
+                await temp_client.sign_in(password=password)
+                
+                user_sessions[user_id] = {
+                    'client': temp_client,
+                    'connected': True,
+                    'connected_at': datetime.now()
+                }
+                
+                if 'temp_client' in user_data[user_id]:
+                    del user_data[user_id]['temp_client']
+                
+                await event.respond(
+                    "<b>✅ Successfully connected!</b>\n\n"
+                    "Your account is now linked. You can start sending delayed messages.",
+                    buttons=main_menu(),
+                    parse_mode="HTML"
+                )
+                del user_states[user_id]
+                
+            except Exception as password_error:
+                logger.error(f"Password error: {password_error}")
+                await event.respond(
+                    "<b>❌ Invalid password!</b>\nPlease try again.",
+                    buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+                    parse_mode="HTML"
+                )
     
     except Exception as e:
         logger.error(f"Error in message handler: {e}")
@@ -680,7 +782,7 @@ async def dial_handler(event):
         await event.edit(
             "<b>🔄 Connecting to your account...</b>\n"
             "This may take a few seconds.",
-            buttons=[],
+            buttons=None,
             parse_mode="HTML"
         )
         
@@ -728,6 +830,73 @@ async def dial_handler(event):
     except Exception as e:
         logger.error(f"Error in dial handler: {e}")
 
+async def send_delayed_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id not in user_sessions or not user_sessions[user_id].get('connected'):
+            await event.edit(
+                "<b>❌ Account not connected!</b>\n\n"
+                "Please connect your account first.",
+                buttons=[[Button.inline("🔗 Connect Account", data="connect")]],
+                parse_mode="HTML"
+            )
+            return
+        
+        current_data = user_data.get(user_id, {})
+        status_text = "<b>📤 Delayed Message Setup:</b>\n\n"
+        status_text += f"Message: {'✅ Set' if current_data.get('temp_message') else '❌ Not set'}\n"
+        status_text += f"Delay: {'✅ ' + str(current_data.get('temp_delay', '')) + ' seconds' if current_data.get('temp_delay') else '❌ Not set'}\n"
+        status_text += f"Chat: {'✅ Selected' if current_data.get('temp_chat_id') else '❌ Not selected'}\n\n"
+        status_text += "Configure all settings, then start sending:"
+        
+        await event.edit(
+            status_text,
+            buttons=delayed_message_menu(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in send_delayed handler: {e}")
+
+async def set_message_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = 'waiting_message'
+        
+        await event.edit(
+            "<b>📝 Message Setup:</b>\n\n"
+            "Please send the message you want to send repeatedly.",
+            buttons=[[Button.inline("◀️ Cancel", data="send_delayed")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in set_message handler: {e}")
+
+async def set_delay_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = 'waiting_delay'
+        
+        await event.edit(
+            "<b>⏰ Delay Setup:</b>\n\n"
+            "Please send the delay in seconds between messages.\n"
+            "Example: 60 (for 1 minute)",
+            buttons=[[Button.inline("◀️ Cancel", data="send_delayed")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in set_delay handler: {e}")
+
+async def back_main_handler(event):
+    try:
+        await event.edit(
+            "<b>🎉 Welcome back! Your account is connected.</b>",
+            buttons=main_menu(),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in back_main handler: {e}")
+
 async def register_handlers():
     if bot_client:
         bot_client.add_event_handler(start_handler, events.NewMessage(pattern="/start"))
@@ -738,6 +907,10 @@ async def register_handlers():
         bot_client.add_event_handler(apihash_handler, events.CallbackQuery(data=b"apihash"))
         bot_client.add_event_handler(phone_handler, events.CallbackQuery(data=b"phone"))
         bot_client.add_event_handler(dial_handler, events.CallbackQuery(data=b"dial"))
+        bot_client.add_event_handler(send_delayed_handler, events.CallbackQuery(data=b"send_delayed"))
+        bot_client.add_event_handler(set_message_handler, events.CallbackQuery(data=b"set_message"))
+        bot_client.add_event_handler(set_delay_handler, events.CallbackQuery(data=b"set_delay"))
+        bot_client.add_event_handler(back_main_handler, events.CallbackQuery(data=b"back_main"))
         bot_client.add_event_handler(message_handler, events.NewMessage())
 
 async def cleanup():
