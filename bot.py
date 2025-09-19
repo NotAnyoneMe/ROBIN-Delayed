@@ -13,7 +13,6 @@ import traceback
 from typing import Dict, Any
 import aiofiles
 
-# Enhanced logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -26,16 +25,14 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Configuration
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 token = os.getenv("TOKEN")
 bot_name = os.getenv("BOT_NAME", "Delayed Message Bot")
-webhook_url = os.getenv("WEBHOOK_URL")  # e.g., https://yourdomain.com/webhook
+webhook_url = os.getenv("WEBHOOK_URL")
 webhook_port = int(os.getenv("WEBHOOK_PORT", 8080))
 webhook_path = os.getenv("WEBHOOK_PATH", "/webhook")
 
-# Global variables
 bot_client = None
 user_data = {}
 user_sessions = {}
@@ -48,18 +45,15 @@ MAX_RETRIES = 3
 RETRY_DELAY = 5
 
 class BotManager:
-    """Enhanced bot manager with better error handling and recovery"""
-    
     def __init__(self):
         self.is_running = False
         self.retry_count = 0
         
     async def start_bot_with_retry(self):
-        """Start bot with retry mechanism"""
         while self.retry_count < MAX_RETRIES and not shutdown_event.is_set():
             try:
                 await self.start_bot()
-                self.retry_count = 0  # Reset on successful start
+                self.retry_count = 0
                 break
             except Exception as e:
                 self.retry_count += 1
@@ -72,14 +66,12 @@ class BotManager:
                     raise
     
     async def start_bot(self):
-        """Start the bot with enhanced error handling"""
         global bot_client
         
         try:
             bot_client = TelegramClient("bot_session", api_id=api_id, api_hash=api_hash)
             await bot_client.start(bot_token=token)
             
-            # Set webhook if URL is provided
             if webhook_url:
                 try:
                     await bot_client.set_webhook(url=f"{webhook_url}{webhook_path}")
@@ -96,7 +88,6 @@ class BotManager:
             raise
 
 async def load_user_data():
-    """Async function to load user data"""
     global user_data
     try:
         if os.path.exists(DATA_FILE):
@@ -109,7 +100,6 @@ async def load_user_data():
         user_data = {}
 
 async def save_user_data():
-    """Async function to save user data"""
     try:
         safe_data = {}
         for user_id, data in user_data.items():
@@ -120,9 +110,7 @@ async def save_user_data():
     except Exception as e:
         logger.error(f"Error saving user data: {e}")
 
-# Webhook handlers
 async def webhook_handler(request):
-    """Handle incoming webhook requests"""
     try:
         if request.method == 'GET':
             return web.Response(text="Webhook is active", status=200)
@@ -130,16 +118,12 @@ async def webhook_handler(request):
         if request.method != 'POST':
             return web.Response(text="Method not allowed", status=405)
         
-        # Verify content type
         if not request.content_type.startswith('application/json'):
             return web.Response(text="Invalid content type", status=400)
         
         data = await request.json()
         
-        # Process the update
         if bot_client and bot_client.is_connected():
-            # Convert webhook data to Telethon update format if needed
-            # This is a simplified example - you might need more complex handling
             await process_webhook_update(data)
         
         return web.Response(text="OK", status=200)
@@ -152,25 +136,18 @@ async def webhook_handler(request):
         return web.Response(text="Internal server error", status=500)
 
 async def process_webhook_update(data: Dict[Any, Any]):
-    """Process webhook updates"""
     try:
-        # Add your webhook processing logic here
-        # This depends on your specific webhook format
         logger.info(f"Processing webhook update: {data}")
         
-        # Example: if you're receiving Telegram updates via webhook
         if 'message' in data:
-            # Process message update
             pass
         elif 'callback_query' in data:
-            # Process callback query update
             pass
             
     except Exception as e:
         logger.error(f"Error processing webhook update: {e}")
 
 async def health_check_handler(request):
-    """Health check endpoint"""
     status = {
         "status": "healthy" if bot_client and bot_client.is_connected() else "unhealthy",
         "timestamp": datetime.now().isoformat(),
@@ -179,9 +156,7 @@ async def health_check_handler(request):
     }
     return web.json_response(status)
 
-# Enhanced error handling for message loops
 async def delayed_message_loop(task_id):
-    """Enhanced message loop with better error handling"""
     task_info = active_tasks.get(task_id)
     if not task_info:
         return
@@ -201,7 +176,7 @@ async def delayed_message_loop(task_id):
                         task_info['message']
                     )
                     active_tasks[task_id]['count'] += 1
-                    consecutive_errors = 0  # Reset error counter on success
+                    consecutive_errors = 0
                     logger.info(f"Message sent for task {task_id}. Count: {active_tasks[task_id]['count']}")
                 
                 await asyncio.sleep(task_info['delay'])
@@ -214,7 +189,6 @@ async def delayed_message_loop(task_id):
                     logger.error(f"Task {task_id} stopped due to too many consecutive errors")
                     break
                 
-                # Exponential backoff for errors
                 error_delay = min(60, 2 ** consecutive_errors)
                 await asyncio.sleep(error_delay)
     
@@ -227,7 +201,6 @@ async def delayed_message_loop(task_id):
             del active_tasks[task_id]
             logger.info(f"Task {task_id} cleaned up")
 
-# Button definitions (keeping original structure)
 def inline_buttons():
     return [
         [
@@ -272,15 +245,14 @@ def message_control_menu(task_id):
         [Button.inline("◀️ Back", data="active_messages")]
     ]
 
-# Event handlers with enhanced error handling
-@bot_client.on(events.NewMessage(pattern="/start"))
+@events.register(events.NewMessage(pattern="/start"))
 async def start(event):
     try:
         user_id = str(event.sender_id)
-        
+
         if user_id in user_sessions and user_sessions[user_id].get('connected'):
             await event.respond(
-                f"<b>🎉 Welcome back! Your account is connected.</b>",
+                "<b>🎉 Welcome back! Your account is connected.</b>",
                 buttons=main_menu(),
                 parse_mode="HTML",
             )
@@ -303,7 +275,7 @@ async def start(event):
         except:
             pass
 
-@bot_client.on(events.CallbackQuery(data=b"help"))
+@events.register(events.CallbackQuery(data=b"help"))
 async def help_handler(event):
     try:
         help_text = """
@@ -339,10 +311,7 @@ async def help_handler(event):
     except Exception as e:
         logger.error(f"Error in help handler: {e}")
 
-# [Continue with all other event handlers - keeping the same logic but adding try/except blocks]
-# I'll include a few key ones here and indicate the pattern:
-
-@bot_client.on(events.CallbackQuery(data=b"connect"))
+@events.register(events.CallbackQuery(data=b"connect"))
 async def connect(event):
     try:
         user_id = str(event.sender_id)
@@ -365,16 +334,44 @@ async def connect(event):
     except Exception as e:
         logger.error(f"Error in connect handler: {e}")
 
-# Graceful shutdown handling
+@events.register(events.CallbackQuery(data=b"back_start"))
+async def back_start(event):
+    try:
+        user_id = str(event.sender_id)
+        if user_id in user_sessions and user_sessions[user_id].get('connected'):
+            await event.edit(
+                "<b>🎉 Welcome back! Your account is connected.</b>",
+                buttons=main_menu(),
+                parse_mode="HTML",
+            )
+        else:
+            await event.edit(
+                f"<b>👋 Hi! I'm {bot_name}!</b>\n\n"
+                "I help you send delayed messages to your Telegram chats and groups.\n\n"
+                "<b>Features:</b>\n"
+                "• Send messages with custom delays\n"
+                "• Control multiple message tasks\n"
+                "• Pause/Resume/Stop functionality\n"
+                "• Send to any chat or group you have access to",
+                buttons=inline_buttons(),
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.error(f"Error in back_start handler: {e}")
+
+async def register_handlers():
+    if bot_client:
+        bot_client.add_event_handler(start)
+        bot_client.add_event_handler(help_handler)
+        bot_client.add_event_handler(connect)
+        bot_client.add_event_handler(back_start)
+
 async def cleanup():
-    """Cleanup function for graceful shutdown"""
     logger.info("Starting cleanup process...")
     
-    # Stop all active tasks
     for task_id in list(active_tasks.keys()):
         del active_tasks[task_id]
     
-    # Disconnect all user sessions
     for user_id, session in user_sessions.items():
         try:
             if session.get('client'):
@@ -382,10 +379,8 @@ async def cleanup():
         except Exception as e:
             logger.error(f"Error disconnecting user {user_id}: {e}")
     
-    # Save data
     await save_user_data()
     
-    # Disconnect bot
     if bot_client and bot_client.is_connected():
         try:
             await bot_client.disconnect()
@@ -395,23 +390,18 @@ async def cleanup():
     logger.info("Cleanup completed")
 
 def signal_handler(signum, frame):
-    """Handle shutdown signals"""
     logger.info(f"Received signal {signum}. Shutting down gracefully...")
     shutdown_event.set()
 
 async def setup_webhook_server():
-    """Setup webhook server"""
     webhook_app.router.add_post(webhook_path, webhook_handler)
     webhook_app.router.add_get(webhook_path, webhook_handler)
     webhook_app.router.add_get('/health', health_check_handler)
-    
-    # Add CORS support
     webhook_app.router.add_route('OPTIONS', webhook_path, lambda req: web.Response())
     
     return webhook_app
 
 async def run_webhook_server():
-    """Run webhook server"""
     try:
         runner = web.AppRunner(webhook_app)
         await runner.setup()
@@ -421,7 +411,6 @@ async def run_webhook_server():
         
         logger.info(f"Webhook server started on port {webhook_port}")
         
-        # Keep server running
         while not shutdown_event.is_set():
             await asyncio.sleep(1)
             
@@ -431,40 +420,28 @@ async def run_webhook_server():
         await runner.cleanup()
 
 async def main():
-    """Main function with enhanced error handling"""
-    # Setup signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        # Load user data
         await load_user_data()
-        
-        # Setup webhook server
         await setup_webhook_server()
         
-        # Initialize bot manager
         bot_manager = BotManager()
         
-        # Create tasks
         tasks = []
         
-        # Start webhook server if configured
         if webhook_url:
             tasks.append(asyncio.create_task(run_webhook_server()))
         
-        # Start bot
-        tasks.append(asyncio.create_task(bot_manager.start_bot_with_retry()))
+        await bot_manager.start_bot_with_retry()
+        await register_handlers()
         
-        # Run bot
         if not webhook_url:
-            # If no webhook, run in polling mode
             tasks.append(asyncio.create_task(bot_client.run_until_disconnected()))
         else:
-            # If webhook mode, just keep alive
             tasks.append(asyncio.create_task(keep_alive()))
         
-        # Wait for shutdown signal
         try:
             await asyncio.gather(*tasks)
         except KeyboardInterrupt:
@@ -477,15 +454,13 @@ async def main():
         await cleanup()
 
 async def keep_alive():
-    """Keep the bot alive in webhook mode"""
     while not shutdown_event.is_set():
         try:
-            # Periodic health check
             if bot_client and not bot_client.is_connected():
                 logger.warning("Bot disconnected. Attempting to reconnect...")
                 await bot_client.connect()
             
-            await asyncio.sleep(30)  # Check every 30 seconds
+            await asyncio.sleep(30)
         except Exception as e:
             logger.error(f"Keep alive error: {e}")
             await asyncio.sleep(5)
