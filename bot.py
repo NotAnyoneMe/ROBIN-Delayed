@@ -1,6 +1,5 @@
 from telethon import TelegramClient, Button, events
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, RPCError
-from telethon.errors.common import NetworkError
 from aiohttp import web, ClientSession
 from dotenv import load_dotenv
 import os
@@ -85,8 +84,12 @@ class BotManager:
         
         try:
             global bot_client
-            if bot_client:
-                await bot_client.disconnect()
+            if bot_client and bot_client.is_connected():
+                try:
+                    await bot_client.disconnect()
+                    await asyncio.sleep(2)
+                except:
+                    pass
             
             await asyncio.sleep(5)
             await self.start_bot()
@@ -259,7 +262,7 @@ async def delayed_message_loop(task_id):
                 
                 await asyncio.sleep(delay)
                 
-            except (NetworkError, RPCError) as conn_error:
+            except (OSError, asyncio.TimeoutError, RPCError) as conn_error:
                 consecutive_errors += 1
                 logger.error(f"Connection error in task {task_id}: {conn_error}")
                 
@@ -313,9 +316,11 @@ async def connection_monitor():
     global bot_client
     bot_manager = BotManager()
     
+    await asyncio.sleep(10)
+    
     while not shutdown_event.is_set():
         try:
-            if not bot_client or not bot_client.is_connected():
+            if bot_client and not bot_client.is_connected():
                 logger.warning("Bot disconnected, attempting restart")
                 success = await bot_manager.restart_bot()
                 if not success:
@@ -479,11 +484,261 @@ async def connect_handler(event):
     except Exception as e:
         logger.error(f"Error in connect handler: {e}")
 
+async def back_start_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id in user_sessions and user_sessions[user_id].get('connected'):
+            await event.edit(
+                "<b>🎉 Welcome back! Your account is connected.</b>",
+                buttons=main_menu(),
+                parse_mode="HTML",
+            )
+        else:
+            await event.edit(
+                f"<b>👋 Hi! I'm {bot_name}!</b>\n\n"
+                "I help you send delayed messages to your Telegram chats and groups.\n\n"
+                "<b>Features:</b>\n"
+                "• Send messages with custom delays\n"
+                "• Control multiple message tasks\n"
+                "• Pause/Resume/Stop functionality\n"
+                "• Send to any chat or group you have access to",
+                buttons=inline_buttons(),
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.error(f"Error in back_start handler: {e}")
+
+async def apiid_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = 'waiting_api_id'
+        
+        await event.edit(
+            "<b>🆔 API ID Setup:</b>\n\n"
+            "Please send your API ID (numbers only).\n"
+            "Get it from https://my.telegram.org",
+            buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in apiid handler: {e}")
+
+async def apihash_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = 'waiting_api_hash'
+        
+        await event.edit(
+            "<b>🔑 API Hash Setup:</b>\n\n"
+            "Please send your API Hash.\n"
+            "Get it from https://my.telegram.org",
+            buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in apihash handler: {e}")
+
+async def phone_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        user_states[user_id] = 'waiting_phone'
+        
+        await event.edit(
+            "<b>📱 Phone Number Setup:</b>\n\n"
+            "Please send your phone number with country code.\n"
+            "Example: +1234567890",
+            buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in phone handler: {e}")
+
+async def message_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id not in user_states:
+            return
+        
+        state = user_states.get(user_id)
+        
+        if state == 'waiting_api_id':
+            try:
+                api_id = int(event.text.strip())
+                if user_id not in user_data:
+                    user_data[user_id] = {}
+                user_data[user_id]['api_id'] = api_id
+                await save_user_data()
+                
+                await event.respond(
+                    "<b>✅ API ID saved!</b>",
+                    buttons=[[Button.inline("◀️ Back to Setup", data="connect")]],
+                    parse_mode="HTML"
+                )
+                del user_states[user_id]
+                
+            except ValueError:
+                await event.respond(
+                    "<b>❌ Invalid API ID!</b>\nPlease send numbers only.",
+                    buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+                    parse_mode="HTML"
+                )
+        
+        elif state == 'waiting_api_hash':
+            api_hash = event.text.strip()
+            if user_id not in user_data:
+                user_data[user_id] = {}
+            user_data[user_id]['api_hash'] = api_hash
+            await save_user_data()
+            
+            await event.respond(
+                "<b>✅ API Hash saved!</b>",
+                buttons=[[Button.inline("◀️ Back to Setup", data="connect")]],
+                parse_mode="HTML"
+            )
+            del user_states[user_id]
+        
+        elif state == 'waiting_phone':
+            phone = event.text.strip()
+            if user_id not in user_data:
+                user_data[user_id] = {}
+            user_data[user_id]['phone'] = phone
+            await save_user_data()
+            
+            await event.respond(
+                "<b>✅ Phone number saved!</b>",
+                buttons=[[Button.inline("◀️ Back to Setup", data="connect")]],
+                parse_mode="HTML"
+            )
+            del user_states[user_id]
+            
+        elif state == 'waiting_message':
+            message = event.text.strip()
+            if user_id not in user_data:
+                user_data[user_id] = {}
+            user_data[user_id]['temp_message'] = message
+            
+            await event.respond(
+                "<b>✅ Message saved!</b>\n\n"
+                f"<b>Message:</b> {message[:100]}{'...' if len(message) > 100 else ''}",
+                buttons=[[Button.inline("◀️ Back to Menu", data="send_delayed")]],
+                parse_mode="HTML"
+            )
+            del user_states[user_id]
+            
+        elif state == 'waiting_delay':
+            try:
+                delay = int(event.text.strip())
+                if delay < 1:
+                    raise ValueError("Delay must be positive")
+                    
+                if user_id not in user_data:
+                    user_data[user_id] = {}
+                user_data[user_id]['temp_delay'] = delay
+                
+                await event.respond(
+                    f"<b>✅ Delay set to {delay} seconds!</b>",
+                    buttons=[[Button.inline("◀️ Back to Menu", data="send_delayed")]],
+                    parse_mode="HTML"
+                )
+                del user_states[user_id]
+                
+            except ValueError:
+                await event.respond(
+                    "<b>❌ Invalid delay!</b>\nPlease send a positive number.",
+                    buttons=[[Button.inline("◀️ Cancel", data="send_delayed")]],
+                    parse_mode="HTML"
+                )
+    
+    except Exception as e:
+        logger.error(f"Error in message handler: {e}")
+
+async def dial_handler(event):
+    try:
+        user_id = str(event.sender_id)
+        
+        if user_id not in user_data:
+            await event.edit(
+                "<b>❌ No connection data found!</b>\n"
+                "Please set your API credentials first.",
+                buttons=structure_connect(),
+                parse_mode="HTML"
+            )
+            return
+        
+        data = user_data[user_id]
+        if not all(k in data for k in ['api_id', 'api_hash', 'phone']):
+            await event.edit(
+                "<b>❌ Missing connection data!</b>\n"
+                "Please set all required fields first.",
+                buttons=structure_connect(),
+                parse_mode="HTML"
+            )
+            return
+        
+        await event.edit(
+            "<b>🔄 Connecting to your account...</b>\n"
+            "This may take a few seconds.",
+            buttons=[],
+            parse_mode="HTML"
+        )
+        
+        try:
+            client = TelegramClient(
+                f"user_{user_id}",
+                data['api_id'],
+                data['api_hash']
+            )
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                await client.send_code_request(data['phone'])
+                user_states[user_id] = 'waiting_code'
+                user_data[user_id]['temp_client'] = client
+                
+                await event.edit(
+                    "<b>📱 Verification code sent!</b>\n\n"
+                    "Please send the verification code you received.",
+                    buttons=[[Button.inline("◀️ Cancel", data="connect")]],
+                    parse_mode="HTML"
+                )
+            else:
+                user_sessions[user_id] = {
+                    'client': client,
+                    'connected': True,
+                    'connected_at': datetime.now()
+                }
+                
+                await event.edit(
+                    "<b>✅ Successfully connected!</b>\n\n"
+                    "Your account is now linked. You can start sending delayed messages.",
+                    buttons=main_menu(),
+                    parse_mode="HTML"
+                )
+        
+        except Exception as connect_error:
+            await event.edit(
+                f"<b>❌ Connection failed!</b>\n\n"
+                f"Error: {str(connect_error)[:200]}",
+                buttons=structure_connect(),
+                parse_mode="HTML"
+            )
+    
+    except Exception as e:
+        logger.error(f"Error in dial handler: {e}")
+
 async def register_handlers():
     if bot_client:
         bot_client.add_event_handler(start_handler, events.NewMessage(pattern="/start"))
         bot_client.add_event_handler(help_handler, events.CallbackQuery(data=b"help"))
         bot_client.add_event_handler(connect_handler, events.CallbackQuery(data=b"connect"))
+        bot_client.add_event_handler(back_start_handler, events.CallbackQuery(data=b"back_start"))
+        bot_client.add_event_handler(apiid_handler, events.CallbackQuery(data=b"apiid"))
+        bot_client.add_event_handler(apihash_handler, events.CallbackQuery(data=b"apihash"))
+        bot_client.add_event_handler(phone_handler, events.CallbackQuery(data=b"phone"))
+        bot_client.add_event_handler(dial_handler, events.CallbackQuery(data=b"dial"))
+        bot_client.add_event_handler(message_handler, events.NewMessage())
 
 async def cleanup():
     logger.info("Starting cleanup process...")
@@ -561,16 +816,17 @@ async def main():
         
         bot_manager = BotManager()
         
-        background_tasks = [
-            asyncio.create_task(run_webhook_server()),
-            asyncio.create_task(connection_monitor()),
-            asyncio.create_task(cleanup_inactive_tasks())
-        ]
-        
         await bot_manager.start_bot_with_retry()
         await register_handlers()
         
-        background_tasks.append(asyncio.create_task(keep_alive()))
+        await asyncio.sleep(2)
+        
+        background_tasks = [
+            asyncio.create_task(run_webhook_server()),
+            asyncio.create_task(connection_monitor()),
+            asyncio.create_task(cleanup_inactive_tasks()),
+            asyncio.create_task(keep_alive())
+        ]
         
         logger.info("All services started successfully")
         
@@ -598,12 +854,20 @@ async def keep_alive():
     connection_errors = 0
     max_connection_errors = 5
     
+    await asyncio.sleep(15)
+    
     while not shutdown_event.is_set():
         try:
-            if bot_client and not bot_client.is_connected():
-                logger.warning("Bot disconnected during keep_alive. Attempting to reconnect...")
-                await bot_client.connect()
+            if bot_client and bot_client.is_connected():
                 connection_errors = 0
+            elif bot_client and not bot_client.is_connected():
+                logger.warning("Bot disconnected during keep_alive. Attempting to reconnect...")
+                try:
+                    await bot_client.connect()
+                    connection_errors = 0
+                except Exception as reconnect_error:
+                    logger.error(f"Reconnect failed: {reconnect_error}")
+                    connection_errors += 1
             
             await asyncio.sleep(30)
             
