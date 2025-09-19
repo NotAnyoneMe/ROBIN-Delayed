@@ -1,5 +1,6 @@
 from telethon import TelegramClient, Button, events
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, ConnectionError, RPCError
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, RPCError
+from telethon.errors.common import NetworkError
 from aiohttp import web, ClientSession
 from dotenv import load_dotenv
 import os
@@ -13,8 +14,6 @@ import traceback
 from typing import Dict, Any, Optional
 import aiofiles
 import uuid
-import weakref
-from contextlib import asynccontextmanager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,7 +112,6 @@ class BotManager:
             )
             await bot_client.start(bot_token=token)
             
-
             try:
                 from telethon.tl.functions.bots import SetBotCommandsRequest
                 from telethon.tl.types import BotCommand
@@ -217,7 +215,6 @@ async def delayed_message_loop(task_id):
     last_message_time = datetime.now()
     
     try:
-        
         if user_id not in user_sessions or not user_sessions[user_id].get('connected'):
             logger.error(f"User {user_id} not connected for task {task_id}")
             return
@@ -226,7 +223,6 @@ async def delayed_message_loop(task_id):
         
         while task_id in active_tasks and active_tasks[task_id]['status'] in ['running', 'paused'] and not shutdown_event.is_set():
             try:
-                
                 if not user_client.is_connected():
                     logger.warning(f"User client disconnected for task {task_id}, attempting reconnect")
                     await user_client.connect()
@@ -253,19 +249,17 @@ async def delayed_message_loop(task_id):
                         logger.error(f"Error sending message for task {task_id}: {send_error}")
                         consecutive_errors += 1
                 
-
                 if datetime.now() - last_message_time > timedelta(minutes=30):
                     logger.warning(f"Task {task_id} inactive for too long, stopping")
                     break
                 
-
                 delay = task_info['delay']
                 if consecutive_errors > 0:
-                    delay = min(delay * (2 ** consecutive_errors), 300) 
+                    delay = min(delay * (2 ** consecutive_errors), 300)
                 
                 await asyncio.sleep(delay)
                 
-            except (ConnectionError, RPCError) as conn_error:
+            except (NetworkError, RPCError) as conn_error:
                 consecutive_errors += 1
                 logger.error(f"Connection error in task {task_id}: {conn_error}")
                 
@@ -273,8 +267,7 @@ async def delayed_message_loop(task_id):
                     logger.error(f"Task {task_id} stopped due to too many consecutive errors")
                     break
                 
-
-                error_delay = min(60 * (2 ** consecutive_errors), 600) 
+                error_delay = min(60 * (2 ** consecutive_errors), 600)
                 await asyncio.sleep(error_delay)
                 
             except Exception as e:
@@ -303,7 +296,6 @@ async def cleanup_inactive_tasks():
             tasks_to_remove = []
             
             for task_id, task_info in active_tasks.items():
-
                 if current_time - task_info.get('started_at', current_time) > timedelta(hours=24):
                     tasks_to_remove.append(task_id)
                     logger.info(f"Removing old task {task_id}")
@@ -323,7 +315,6 @@ async def connection_monitor():
     
     while not shutdown_event.is_set():
         try:
-        
             if not bot_client or not bot_client.is_connected():
                 logger.warning("Bot disconnected, attempting restart")
                 success = await bot_manager.restart_bot()
@@ -332,10 +323,8 @@ async def connection_monitor():
                     await asyncio.sleep(60)
                     continue
             
-
             last_heartbeat['bot'] = datetime.now()
             
-
             disconnected_users = []
             for user_id, session in user_sessions.items():
                 if session.get('connected'):
@@ -344,11 +333,10 @@ async def connection_monitor():
                         logger.warning(f"User {user_id} disconnected")
                         disconnected_users.append(user_id)
             
-
             for user_id in disconnected_users:
                 if user_id in user_sessions:
                     user_sessions[user_id]['connected'] = False
-
+                    
                     user_tasks = [k for k, v in active_tasks.items() if v['user_id'] == user_id]
                     for task_id in user_tasks:
                         if task_id in active_tasks:
@@ -405,11 +393,10 @@ def message_control_menu(task_id):
         [Button.inline("◀️ Back", data="active_messages")]
     ]
 
-@events.register(events.NewMessage(pattern="/start"))
-async def start(event):
+async def start_handler(event):
     try:
         user_id = str(event.sender_id)
-
+        
         if user_id in user_sessions and user_sessions[user_id].get('connected'):
             await event.respond(
                 "<b>🎉 Welcome back! Your account is connected.</b>",
@@ -435,7 +422,6 @@ async def start(event):
         except:
             pass
 
-@events.register(events.CallbackQuery(data=b"help"))
 async def help_handler(event):
     try:
         help_text = """
@@ -471,10 +457,7 @@ async def help_handler(event):
     except Exception as e:
         logger.error(f"Error in help handler: {e}")
 
-# [Continue with all the other event handlers - they remain largely the same but with better error handling]
-
-@events.register(events.CallbackQuery(data=b"connect"))
-async def connect(event):
+async def connect_handler(event):
     try:
         user_id = str(event.sender_id)
         
@@ -496,32 +479,21 @@ async def connect(event):
     except Exception as e:
         logger.error(f"Error in connect handler: {e}")
 
-
-
 async def register_handlers():
     if bot_client:
-        handlers = [
-            start, help_handler, connect,
-
-        ]
-        
-        for handler in handlers:
-            try:
-                bot_client.add_event_handler(handler)
-            except Exception as e:
-                logger.error(f"Failed to register handler {handler.__name__}: {e}")
+        bot_client.add_event_handler(start_handler, events.NewMessage(pattern="/start"))
+        bot_client.add_event_handler(help_handler, events.CallbackQuery(data=b"help"))
+        bot_client.add_event_handler(connect_handler, events.CallbackQuery(data=b"connect"))
 
 async def cleanup():
     logger.info("Starting cleanup process...")
     
-
     for task_id in list(active_tasks.keys()):
         try:
             del active_tasks[task_id]
         except:
             pass
     
-
     for user_id, session in user_sessions.items():
         try:
             if session.get('client'):
@@ -529,10 +501,8 @@ async def cleanup():
         except Exception as e:
             logger.error(f"Error disconnecting user {user_id}: {e}")
     
-
     await save_user_data()
     
-
     if bot_client and bot_client.is_connected():
         try:
             await asyncio.wait_for(bot_client.disconnect(), timeout=5)
@@ -547,26 +517,10 @@ def signal_handler(signum, frame):
         shutdown_event.set()
 
 async def setup_webhook_server():
-
-    async def cors_middleware(request, handler):
-        if request.method == 'OPTIONS':
-            return web.Response(
-                headers={
-                    'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type',
-                }
-            )
-        response = await handler(request)
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
-    
-    webhook_app.middlewares.append(cors_middleware)
     webhook_app.router.add_post(webhook_path, webhook_handler)
     webhook_app.router.add_get(webhook_path, webhook_handler)
     webhook_app.router.add_get('/health', health_check_handler)
     webhook_app.router.add_get('/', lambda req: web.Response(text="Bot is running", status=200))
-    webhook_app.router.add_route('OPTIONS', webhook_path, lambda req: web.Response())
     
     return webhook_app
 
@@ -594,7 +548,6 @@ async def run_webhook_server():
                 pass
 
 async def main():
-
     for sig in [signal.SIGTERM, signal.SIGINT]:
         try:
             signal.signal(sig, signal_handler)
@@ -608,31 +561,25 @@ async def main():
         
         bot_manager = BotManager()
         
-
         background_tasks = [
             asyncio.create_task(run_webhook_server()),
             asyncio.create_task(connection_monitor()),
             asyncio.create_task(cleanup_inactive_tasks())
         ]
         
-
         await bot_manager.start_bot_with_retry()
         await register_handlers()
         
-
         background_tasks.append(asyncio.create_task(keep_alive()))
         
         logger.info("All services started successfully")
         
-
         await shutdown_event.wait()
         logger.info("Shutdown signal received, stopping services...")
         
-
         for task in background_tasks:
             task.cancel()
         
-
         try:
             await asyncio.wait_for(
                 asyncio.gather(*background_tasks, return_exceptions=True),
@@ -662,7 +609,7 @@ async def keep_alive():
             
         except Exception as e:
             connection_errors += 1
-            logger.error(f"Keep alive error: {e}")
+            logger.error(f"Keep_alive error: {e}")
             
             if connection_errors >= max_connection_errors:
                 logger.error("Too many connection errors in keep_alive, setting shutdown")
@@ -673,7 +620,6 @@ async def keep_alive():
 
 if __name__ == "__main__":
     try:
-
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot shutdown requested via keyboard interrupt")
